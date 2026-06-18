@@ -23,7 +23,6 @@ from genworlds.agents.abstracts.thought import AbstractThought
 class BasicAssistant(AbstractAgent):
     def __init__(
         self,
-        openai_api_key: str,
         name: str,
         id: str,
         description: str,
@@ -31,23 +30,17 @@ class BasicAssistant(AbstractAgent):
         initial_agent_state: AbstractAgentState = None,
         action_classes: List[type[AbstractAction]] = [],
         other_thoughts: List[AbstractThought] = [],
-        model_name: str = "gpt-3.5-turbo-1106",
+        model_name: str = "gpt-4o-mini",
     ):
-        state_manager = BasicAssistantStateManager(
-            self, initial_agent_state, openai_api_key
-        )
+        state_manager = BasicAssistantStateManager(self, initial_agent_state)
         action_planner = BasicAssistantActionPlanner(
-            openai_api_key=openai_api_key,
             initial_agent_state=state_manager.state,
             other_thoughts=other_thoughts,
             model_name=model_name,
             host_agent=self,
         )
 
-        actions = []
-        for action_class in action_classes:
-            actions.append(action_class(host_object=self))
-
+        actions = [action_class(host_object=self) for action_class in action_classes]
         actions.append(UpdateAgentAvailableEntities(host_object=self))
         actions.append(UpdateAgentAvailableActionSchemas(host_object=self))
         actions.append(AgentGoesToSleep(host_object=self))
@@ -60,9 +53,8 @@ class BasicAssistant(AbstractAgent):
         )
 
     def add_wakeup_event(self, event_class: AbstractEvent):
-        self.state_manager.state.wakeup_event_types.add(
-            event_class.__fields__["event_type"].default
-        )
+        event_type = event_class.model_fields["event_type"].default
+        self.state_manager.state.wakeup_event_types.add(event_type)
 
     def add_memory_ignored_event(self, event_type: str):
         self.state_manager.state.memory_ignored_event_types.add(event_type)

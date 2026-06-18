@@ -1,9 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Type, Any, Dict
 from enum import Enum
-from genworlds.agents.abstracts.agent import AbstractAgent
-from genworlds.objects.abstracts.object import AbstractObject
 from pydantic import BaseModel
+from pydantic import ConfigDict
 
 
 class EntityTypeEnum(str, Enum):
@@ -14,6 +13,8 @@ class EntityTypeEnum(str, Enum):
 
 def get_entity_type(cls):
     from genworlds.worlds.abstracts.world import AbstractWorld
+    from genworlds.agents.abstracts.agent import AbstractAgent
+    from genworlds.objects.abstracts.object import AbstractObject
 
     if issubclass(cls, AbstractAgent):
         return EntityTypeEnum.AGENT
@@ -21,41 +22,31 @@ def get_entity_type(cls):
         return EntityTypeEnum.WORLD
     elif issubclass(cls, AbstractObject):
         return EntityTypeEnum.OBJECT
-    else:
-        return None
+    return None
 
 
 class AbstractWorldEntity(BaseModel, ABC):
+    model_config = ConfigDict(extra="allow")
+
     id: str
     entity_type: EntityTypeEnum
     entity_class: str
     name: str
     description: str
 
-    class Config:
-        extra = "allow"
-
     @classmethod
     def create(
         cls: Type["AbstractWorldEntity"],
-        entity: AbstractObject,
-        **additional_world_properties: Dict
+        entity: Any,
+        **additional_world_properties: Any,
     ) -> "AbstractWorldEntity":
         entity_cls = type(entity)
-        entity_type = get_entity_type(entity_cls)
-        entity_class = entity_cls.__name__
-        id = entity.id
-        name = entity.name
-        description = entity.description
-        # Combine predefined fields with any additional fields provided
         entity_data = {
-            **{
-                "id": id,
-                "entity_type": entity_type,
-                "entity_class": entity_class,
-                "name": name,
-                "description": description,
-            },
+            "id": entity.id,
+            "entity_type": get_entity_type(entity_cls),
+            "entity_class": entity_cls.__name__,
+            "name": entity.name,
+            "description": entity.description,
             **additional_world_properties,
         }
         return cls(**entity_data)

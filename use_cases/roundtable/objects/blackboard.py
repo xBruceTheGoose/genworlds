@@ -1,7 +1,9 @@
+import logging
 from typing import List
 
-from genworlds.worlds.base_world import BaseObject
-from genworlds.objects.base_object import BaseObject
+from genworlds.objects.abstracts.object import AbstractObject
+from genworlds.events.abstracts.action import AbstractAction
+from use_cases.roundtable.objects.job import Job
 from use_cases.roundtable.events import (
     AgentReadsBlackboardEvent,
     AgentDeletesJobFromBlackboardEvent,
@@ -9,67 +11,70 @@ from use_cases.roundtable.events import (
     BlackboardSendsContentEvent,
     UserAddsJobToBlackboardEvent,
 )
-from use_cases.roundtable.objects.job import Job
+
+logger = logging.getLogger(__name__)
 
 
-class Blackboard(BaseObject):
-    content: List[Job] = []
+class ReadBlackboard(AbstractAction):
+    trigger_event_class = AgentReadsBlackboardEvent
+    description = "Read the content of the blackboard."
 
-    def __init__(
-        self,
-        name: str,
-        description: str,
-        id: str = None,
-        websocket_url: str = "ws://127.0.0.1:7456/ws",
-    ):
-        super().__init__(
-            name,
-            description,
-            id=id,
-            websocket_url=websocket_url,
+    def __init__(self, host_object: AbstractObject):
+        super().__init__(host_object=host_object)
+
+    def __call__(self, event: AgentReadsBlackboardEvent):
+        logger.info("Agent %s reads blackboard %s.", event.sender_id, self.host_object.id)
+        self.host_object.send_event(
+            BlackboardSendsContentEvent(
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                blackboard_content=list(self.host_object.content),
+            )
         )
 
-        self.register_event_listeners(
-            [
-                (AgentReadsBlackboardEvent, self.agent_reads_blackboard_listener),
-                (
-                    AgentAddsJobToBlackboardEvent,
-                    self.agent_adds_job_to_blackboard_listener,
-                ),
-                (
-                    UserAddsJobToBlackboardEvent,
-                    self.user_adds_job_to_blackboard_listener,
-                ),
-                (
-                    AgentDeletesJobFromBlackboardEvent,
-                    self.agent_deletes_job_from_blackboard_listener,
-                ),
-            ]
-        )
 
-    def _add_job(self, new_job: Job):
-        self.content.append(new_job)
+class AddJob(AbstractAction):
+    trigger_event_class = AgentAddsJobToBlackboardEvent
+    description = "Add a job to the blackboard."
 
-    def _delete_job(self, job_id: str):
-        self.content = [job for job in self.content if job.id != job_id]
+    def __init__(self, host_object: AbstractObject):
+        super().__init__(host_object=host_object)
 
-    def agent_reads_blackboard_listener(self, event: AgentReadsBlackboardEvent):
-        print(f"Agent {event.sender_id} reads blackboard {self.id}.")
-        self.send_event(
-            BlackboardSendsContentEvent,
-            target_id=event.sender_id,
-            blackboard_content=self.content,
-        )
+    def __call__(self, event: AgentAddsJobToBlackboardEvent):
+        self.host_object.content.append(event.new_job)
 
-    def agent_deletes_job_from_blackboard_listener(
-        self, event: AgentDeletesJobFromBlackboardEvent
-    ):
-        self._delete_job(event.job_id)
 
-    def agent_adds_job_to_blackboard_listener(
-        self, event: AgentAddsJobToBlackboardEvent
-    ):
-        self._add_job(event.new_job)
+class AddJobFromUser(AbstractAction):
+    trigger_event_class = UserAddsJobToBlackboardEvent
+    description = "User adds a job to the blackboard."
 
-    def user_adds_job_to_blackboard_listener(self, event: UserAddsJobToBlackboardEvent):
-        self._add_job(event.new_job)
+    def __init__(self, host_object: AbstractObject):
+        super().__init__(host_object=host_object)
+
+    def __call__(self, event: UserAddsJobToBlackboardEvent):
+        self.host_object.content.append(event.new_job)
+
+
+class DeleteJob(AbstractAction):
+    trigger_event_class = AgentDeletesJobFromBlackboardEvent
+    description = "Delete a job from the blackboard."
+
+    def __init__(self, host_object: AbstractObject):
+        super().__init__(host_object=host_object)
+
+    def __call__(self, event: AgentDeletesJobFromBlackboardEvent):
+        self.host_object.content = [
+            job for job in self.host_object.content if job.id != event.job_id
+        ]
+
+
+class Blackboard(AbstractObject):
+    def __init__(self, name: str, description: str, id: str = None):
+        self.content: List[Job] = []
+        actions = [
+            ReadBlackboard(host_object=self),
+            AddJob(host_object=self),
+            AddJobFromUser(host_object=self),
+            DeleteJob(host_object=self),
+        ]
+        super().__init__(name=name, description=description, id=id, actions=actions)

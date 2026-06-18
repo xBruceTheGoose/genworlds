@@ -1,26 +1,27 @@
-# DB migration
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 def run_chroma_to_qdrant_migration(
     collections: list[str], chroma_db_path: str, qdrant_db_path: str
 ):
+    """Migrate vector collections from ChromaDB to Qdrant."""
     import os
     import chromadb
     from dotenv import load_dotenv
-    from langchain.vectorstores import Chroma, Qdrant
-    from langchain.embeddings import OpenAIEmbeddings
+    from langchain_community.vectorstores import Chroma, Qdrant
+    from langchain_openai import OpenAIEmbeddings
     from qdrant_client.http import models as rest
     from qdrant_client import QdrantClient
 
     load_dotenv(dotenv_path=".env")
-    openai_api_key = os.getenv("OPENAI_API_KEY")
 
-    ABS_PATH = os.path.dirname(os.path.abspath(__file__))
-
-    embeddings_model = OpenAIEmbeddings(openai_api_key=openai_api_key)
-
+    embeddings_model = OpenAIEmbeddings()
     qdrant_client = QdrantClient(path=qdrant_db_path)
 
     for collection_name in collections:
-        print("Migrating collection", collection_name)
+        logger.info("Migrating collection '%s'", collection_name)
         client_settings = chromadb.config.Settings(
             chroma_db_impl="duckdb+parquet",
             persist_directory=chroma_db_path,
@@ -38,7 +39,13 @@ def run_chroma_to_qdrant_migration(
             include=["embeddings", "metadatas", "documents"]
         )
 
-        qdrant_client.recreate_collection(
+        # Use create_collection with recreate logic instead of the removed recreate_collection
+        existing = {
+            c.name for c in qdrant_client.get_collections().collections
+        }
+        if collection_name in existing:
+            qdrant_client.delete_collection(collection_name)
+        qdrant_client.create_collection(
             collection_name=collection_name,
             vectors_config=rest.VectorParams(
                 distance=rest.Distance.COSINE,
@@ -60,4 +67,4 @@ def run_chroma_to_qdrant_migration(
             ),
         )
 
-    print("Done")
+    logger.info("Migration complete.")

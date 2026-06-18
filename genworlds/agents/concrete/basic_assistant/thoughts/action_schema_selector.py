@@ -1,30 +1,25 @@
-from typing import List
+import os
+from typing import List, Tuple
+
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+
 from genworlds.agents.abstracts.agent_state import AbstractAgentState
 from genworlds.agents.abstracts.thought import AbstractThought
-from langchain.chat_models import ChatOpenAI
-from enum import Enum
-from pydantic import BaseModel, Field
-from langchain.chains.openai_functions import (
-    create_structured_output_chain,
-)
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import ChatPromptTemplate
 
 
 class ActionSchemaSelectorThought(AbstractThought):
     def __init__(
         self,
         agent_state: AbstractAgentState,
-        openai_api_key: str,
-        model_name: str = "gpt-3.5-turbo-1106",
+        model_name: str = "gpt-4o-mini",
     ):
         self.agent_state = agent_state
-        self.model_name = model_name
-        self.llm = ChatOpenAI(
-            model=self.model_name, openai_api_key=openai_api_key, temperature=0.1
-        )
+        api_key = os.environ.get("OPENAI_API_KEY")
+        self.llm = ChatOpenAI(model=model_name, api_key=api_key, temperature=0.1)
 
-    def run(self):
+    def run(self) -> Tuple[str, List[str]]:
         class PlanNextAction(BaseModel):
             """Plans for the next action to be executed by the agent."""
 
@@ -44,15 +39,12 @@ class ActionSchemaSelectorThought(AbstractThought):
             )
 
         action_schemas_full_string = "## Available Actions: \n\n"
-        for (
-            action_schema_key,
-            action_schema_value,
-        ) in self.agent_state.available_action_schemas.items():
+        for key, value in self.agent_state.available_action_schemas.items():
             action_schemas_full_string += (
                 "Action Name: "
-                + action_schema_key
+                + key
                 + "\nAction Description: "
-                + action_schema_value.split("|")[0]
+                + value.split("|")[0]
                 + "\n\n"
             )
 
@@ -80,22 +72,26 @@ class ActionSchemaSelectorThought(AbstractThought):
             ]
         )
 
-        chain = create_structured_output_chain(
-            PlanNextAction.schema(), self.llm, prompt, verbose=True
-        )
+        structured_llm = self.llm.with_structured_output(PlanNextAction)
+        chain = prompt | structured_llm
 
-        response = chain.run(
-            agent_name=self.agent_state.name,
-            agent_description=self.agent_state.description,
-            agent_world_state=self.agent_state.host_world_prompt,
-            goals=self.agent_state.goals,
-            plan=self.agent_state.plan,
-            memory=self.agent_state.last_retrieved_memory,
-            available_actions=action_schemas_full_string,
-            footer="""Select the next action which must be a value of the available actions that you can choose from based on previous context.
-Also select whether the action is valid or not, and if not, why.
-And finally, state a new updated plan that you want to execute to achieve your goals. If your next action is going to sleep, then you don't need to state a new plan.
-            """,
+        response: PlanNextAction = chain.invoke(
+            {
+                "agent_name": self.agent_state.name,
+                "agent_description": self.agent_state.description,
+                "agent_world_state": self.agent_state.host_world_prompt,
+                "goals": self.agent_state.goals,
+                "plan": self.agent_state.plan,
+                "memory": self.agent_state.last_retrieved_memory,
+                "available_actions": action_schemas_full_string,
+                "footer": (
+                    "Select the next action which must be a value of the available actions "
+                    "that you can choose from based on previous context.\n"
+                    "Also select whether the action is valid or not, and if not, why.\n"
+                    "And finally, state a new updated plan that you want to execute to achieve "
+                    "your goals. If your next action is going to sleep, then you don't need to "
+                    "state a new plan."
+                ),
+            }
         )
-        response = PlanNextAction.parse_obj(response)
         return response.action_name, response.new_plan

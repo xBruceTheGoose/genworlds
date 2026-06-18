@@ -1,52 +1,77 @@
-import os
-import sys
+from __future__ import annotations
+
+import asyncio
 import argparse
-import threading
-from typing import List
 import logging
+import sys
+import threading
+from contextlib import asynccontextmanager
+from typing import List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class WebSocketManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self._lock: asyncio.Lock | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections.append(websocket)
+        async with self._get_lock():
+            self.active_connections.append(websocket)
 
     async def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        async with self._get_lock():
+            try:
+                self.active_connections.remove(websocket)
+            except ValueError:
+                pass
 
     async def send_update(self, data: str):
-        closed_connections = []
-        for connection in self.active_connections:
+        async with self._get_lock():
+            connections = list(self.active_connections)
+
+        stale: List[WebSocket] = []
+        for connection in connections:
             try:
                 await connection.send_text(data)
             except RuntimeError as e:
-                if "Unexpected ASGI message" in str(e) and "websocket.close" in str(e):
-                    closed_connections.append(connection)
+                if "websocket.close" in str(e) or "Unexpected ASGI" in str(e):
+                    stale.append(connection)
                 else:
-                    raise e
-        for closed_connection in closed_connections:
-            self.active_connections.remove(closed_connection)
+                    logger.warning("WebSocket send error: %s", e)
+            except Exception as e:
+                logger.warning("WebSocket send error: %s", e)
+                stale.append(connection)
+
+        if stale:
+            async with self._get_lock():
+                for ws in stale:
+                    try:
+                        self.active_connections.remove(ws)
+                    except ValueError:
+                        pass
 
 
-app = FastAPI()
 websocket_manager = WebSocketManager()
 
-socket_server_url = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    logger.info("Simulation socket server shutting down.")
 
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    logger.info("SIGTERM received, stopping server...")
-    sys.exit(0)
+app = FastAPI(lifespan=lifespan)
 
 
 @app.websocket("/ws")
@@ -55,65 +80,49 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            logger.debug(f"Received data: {data}")
-            print(data)
+            logger.debug("Received: %s", data)
             await websocket_manager.send_update(data)
     except WebSocketDisconnect as e:
-        logger.warning(f"WebSocketDisconnect: {e.code}")
+        logger.info("Client disconnected (code=%s)", e.code)
     except Exception as e:
-        logger.error(f"Exception: {type(e).__name__}, {e}", exc_info=True)
+        logger.error("WebSocket handler error: %s", e, exc_info=True)
     finally:
         await websocket_manager.disconnect(websocket)
 
 
-def start(host: str = "127.0.0.1", port: int = 7456, silent: bool = False, ws_ping_interval: int = 600, ws_ping_timeout: int = 600, timeout_keep_alive: int = 60):
-    if silent:
-        sys.stdout = open(os.devnull, "w")
-        sys.stderr = open(os.devnull, "w")
-
-    uvicorn.run(app, 
-                host=host, 
-                port=port, 
-                log_level="info",
-                ws_ping_interval=ws_ping_interval,
-                ws_ping_timeout=ws_ping_timeout,
-                timeout_keep_alive=timeout_keep_alive)  
-
-    if silent:
-        sys.stdout = sys.__stdout__
-        sys.stderr = sys.__stderr__
+def start(
+    host: str = "127.0.0.1",
+    port: int = 7456,
+    silent: bool = False,
+    ws_ping_interval: int = 600,
+    ws_ping_timeout: int = 600,
+    timeout_keep_alive: int = 60,
+):
+    log_level = "warning" if silent else "info"
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+        log_level=log_level,
+        ws_ping_interval=ws_ping_interval,
+        ws_ping_timeout=ws_ping_timeout,
+        timeout_keep_alive=timeout_keep_alive,
+    )
 
 
 def start_thread(host: str = "127.0.0.1", port: int = 7456, silent: bool = False):
     threading.Thread(
         target=start,
-        name=f"Websocket Server Thread",
+        name="WebSocket Server Thread",
         daemon=True,
-        args=(
-            host,
-            port,
-            silent,
-        ),
+        kwargs={"host": host, "port": port, "silent": silent},
     ).start()
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Start the world socket server.")
-    parser.add_argument(
-        "--port",
-        type=int,
-        help="The port to start the socket on.",
-        default=7456,
-        nargs="?",
-    )
-    parser.add_argument(
-        "--host",
-        type=str,
-        help="The hostname of the socket.",
-        default="127.0.0.1",
-        nargs="?",
-    )
-
+    parser.add_argument("--port", type=int, default=7456, nargs="?")
+    parser.add_argument("--host", type=str, default="127.0.0.1", nargs="?")
     return parser.parse_args()
 
 

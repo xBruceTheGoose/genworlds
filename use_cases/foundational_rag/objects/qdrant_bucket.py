@@ -1,262 +1,230 @@
 import os
 import json
+import logging
+import threading
 from json import JSONDecodeError
 from typing import List
-import threading
 
 from qdrant_client import QdrantClient
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.vectorstores import Qdrant
-from langchain.docstore.document import Document
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_community.vectorstores import Qdrant
+from langchain_core.documents import Document
 from langchain.text_splitter import CharacterTextSplitter, TokenTextSplitter
 
 from genworlds.objects.abstracts.object import AbstractObject
 from genworlds.events.abstracts.event import AbstractEvent
 from genworlds.events.abstracts.action import AbstractAction
 
-# Define the QdrantBucket Object
-class QdrantBucket(AbstractObject):
-    def __init__(self, id:str, path: str = "./vector_store.qdrant"):
-        self.path = path
-        self.is_busy = False
-        actions = [
-            GenerateTextChunkCollection(host_object=self),
-            GenerateNERCollection(host_object=self),
-            RetrieveChunksBySimilarity(host_object=self),
-        ]
-        super().__init__(
-            name="Qdrant Bucket",
-            description="A specialized object designed to manage interactions with the Qdrant vector store. This includes operations like generating text chunk collections, named entity recognition collections, and retrieving chunks by similarity.",
-            id=id,
-            actions=actions,
-        )
+logger = logging.getLogger(__name__)
+
+_NER_SYSTEM_PROMPT = """
+Task:
+
+Extract the named entities and their descriptions from the provided text.
+An entity in this context refers to a term, concept, or organization that
+has an explicit explanation or definition in the text.
+
+Process:
+
+1. Identify distinct named entities in the text.
+2. Extract the corresponding explanation or definition for each entity.
+3. Present entities in the format {"Entities": [{"Entity1": "desc1"}, ...]}.
+4. Verify the dict can be loaded with json.loads().
+5. If no explained entities are identified, state "NO ENTITIES EXPLAINED".
+
+Text:
+
+"""
+
 
 class VectorStoreCollectionCreated(AbstractEvent):
-    event_type = "vector_store_collection_created"
-    description = "Notifies that a new collection has been successfully created in the Qdrant vector store."
+    event_type: str = "vector_store_collection_created"
+    description: str = "Notifies that a new collection has been created."
     has_been_created: bool = False
     collection_name: str
+    sender_id: str
+
 
 class VectorStoreCollectionCreationInProcess(AbstractEvent):
-    event_type = "vector_store_collection_creation_in_process"
-    description = "Notifies that the creation process of the new collection is ongoing. Is a very long process, it can take several minutes to complete."
+    event_type: str = "vector_store_collection_creation_in_process"
+    description: str = "Notifies that collection creation is ongoing."
     collection_name: str
+    sender_id: str
+
 
 class AgentGeneratesTextChunkCollection(AbstractEvent):
-    event_type = "agent_generates_text_chunk_collection"
-    description = "Event triggered when an agent needs to generate a collection of text chunks for storage in Qdrant."
+    event_type: str = "agent_generates_text_chunk_collection"
+    description: str = "Agent needs to generate a collection of text chunks for Qdrant."
     full_text_path: str
     collection_name: str
     num_tokens_chunk_size: int = 500
     metadata: dict = {}
+    sender_id: str
+
 
 class GenerateTextChunkCollection(AbstractAction):
     trigger_event_class = AgentGeneratesTextChunkCollection
-    description = "Action that generates a collection of text chunks for storage in Qdrant."
+    description = "Generate a collection of text chunks for storage in Qdrant."
+
     def __init__(self, host_object: AbstractObject):
         super().__init__(host_object=host_object)
 
     def __call__(self, event: AgentGeneratesTextChunkCollection):
-        # If is not threaded the socket disconnects the client due to timeout (it can not ping the server while working)
         threading.Thread(
-            target=self._agent_generates_text_chunk_collection, args=(event,)
+            target=self._run, args=(event,), daemon=True
         ).start()
 
-    # Function that executes the action of generating a text chunk collection in a qdrant vector store
-    def _agent_generates_text_chunk_collection(
-        self, event: AgentGeneratesTextChunkCollection
-    ):
-        # conversion has started message, it will take a while, several minutes before completion
+    def _run(self, event: AgentGeneratesTextChunkCollection):
         self.host_object.send_event(
             VectorStoreCollectionCreationInProcess(
-            sender_id=self.host_object.id,
-            target_id=event.sender_id,
-            collection_name=event.collection_name,
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                collection_name=event.collection_name,
             )
         )
-
         text_splitter = TokenTextSplitter(
             chunk_size=event.num_tokens_chunk_size, chunk_overlap=0
         )
-
         with open(event.full_text_path, "r") as f:
             joint_text = f.read()
 
         texts = text_splitter.split_text(joint_text)
-        data = [Document(page_content=el) for el in texts]
-        documents = data
-        text_splitter = CharacterTextSplitter(
-            chunk_size=event.num_tokens_chunk_size, chunk_overlap=0
-        )
-        docs = text_splitter.split_documents(documents)
+        docs = [Document(page_content=t) for t in texts]
         embeddings = OpenAIEmbeddings()
-        qdrant_chunks = Qdrant.from_documents(
+        Qdrant.from_documents(
             docs,
             embeddings,
             path=self.host_object.path,
             collection_name=event.collection_name,
         )
-
-        print(
-            f"Agent {event.sender_id} has created the collection: {event.collection_name}."
+        logger.info(
+            "Agent %s created collection '%s'.", event.sender_id, event.collection_name
         )
         self.host_object.send_event(
             VectorStoreCollectionCreated(
-            sender_id=self.host_object.id,
-            target_id=event.sender_id,
-            collection_name=event.collection_name,
-            has_been_created=True,
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                collection_name=event.collection_name,
+                has_been_created=True,
             )
         )
 
+
 class AgentGeneratesNERCollection(AbstractEvent):
-    event_type = "agent_generates_ner_collection"
-    description = "Event indicating the agent's intent to generate a collection of named entities extracted from a provided text."
+    event_type: str = "agent_generates_ner_collection"
+    description: str = "Agent generates a named entity collection from a text."
     full_text_path: str
     collection_name: str
     num_tokens_chunk_size: int = 500
     metadata: dict = {}
-    
+    sender_id: str
+
+
 class GenerateNERCollection(AbstractAction):
     trigger_event_class = AgentGeneratesNERCollection
-    description = "Action that generates a collection of named entities extracted from a provided text."
+    description = "Generate a named entity recognition collection for storage in Qdrant."
+
     def __init__(self, host_object: AbstractObject):
         super().__init__(host_object=host_object)
 
     def __call__(self, event: AgentGeneratesNERCollection):
-        # If is not threaded the socket disconnects the client due to timeout (it can not ping the server while working)
-        threading.Thread(
-            target=self._agent_generates_ner_collection, args=(event,)
-        ).start()
+        threading.Thread(target=self._run, args=(event,), daemon=True).start()
 
-    # Function that executes the action of generating a text chunk collection in a qdrant vector store
-    def _agent_generates_ner_collection(self, event: AgentGeneratesNERCollection):
+    def _run(self, event: AgentGeneratesNERCollection):
         self.host_object.is_busy = True
         self.host_object.send_event(
             VectorStoreCollectionCreationInProcess(
-            sender_id=self.host_object.id,
-            target_id=event.sender_id,
-            collection_name=event.collection_name,
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                collection_name=event.collection_name,
             )
         )
-        chat = ChatOpenAI(openai_api_key=os.getenv("OPENAI_API_KEY"), model="gpt-4")
-
-        sys_prompt = SystemMessage(
-            content="""
-        Task:
-
-        Extract the named entities and their descriptions from the provided text. An entity in this context refers to a term, concept, or organization that has an explicit explanation or definition in the text.
-
-        Process:
-
-        1. Identify distinct named entities in the text, which its explanation is also contained in the text.
-        2. Extract the corresponding explanation or definition for each identified entity.
-        3. Present the entity paired with its description in a python dict format {"Entities": [{"Entity1", "desc1"},{"Entity2", "desc2"}, ...]}.
-        4. Check that the created python dict has the correct format for being imported with json.loads().
-        5. If no explained entities are identified, state "NO ENTITIES EXPLAINED".
-
-        Guidelines:
-
-        - Entities might be names of people, locations, organizations, projects, concepts, or terms used in a specialized context.
-        - The description or definition of a named entity typically follows the entity itself and provides clarity about its meaning or context.
-        - Ensure to capture the full explanation of the named entity, even if it spans multiple sentences.
-        - The descriptions of the entities should make you understand the concept as listed below.
-        - Make 100% sure that the final format is a python dict that can be loaded with json.loads() instruction.
-
-        Text:
-
-        """
-        )
+        chat = ChatOpenAI(model="gpt-4o-mini")
+        sys_msg = SystemMessage(content=_NER_SYSTEM_PROMPT)
 
         with open(event.full_text_path, "r") as f:
             joint_text = f.read()
 
         text_splitter = TokenTextSplitter(chunk_size=1000, chunk_overlap=0)
+        chunks = [
+            Document(page_content=t)
+            for t in text_splitter.split_text(joint_text)
+        ]
 
-        texts = text_splitter.split_text(joint_text)
-        data = [Document(page_content=el) for el in texts]
-
-        concepts = []
-        for i in range(len(data)):
-            text_to_send = data[i].page_content
-            message = chat([sys_prompt, HumanMessage(content=text_to_send)])
-            if "NO ENTITIES EXPLAINED" in message.content:
-                print("No entities found in this chunk of text...")
-                continue
-            else:
-                success = False
-                for j in range(10):
-                    try:
-                        conc = json.loads(message.content)
-                        concepts.append(conc)
-                        success = True
-                        break
-                    except JSONDecodeError:
-                        print(
-                            "The dict generated by the LLM, does not have the proper format. Retrying...."
-                        )
-                        message = chat([sys_prompt, HumanMessage(content=text_to_send)])
-                if not success:
-                    print(
-                        "It was not possible to format correctly the dict after 10 tries."
+        concepts: List[dict] = []
+        for i, chunk in enumerate(chunks):
+            for attempt in range(10):
+                reply = chat.invoke([sys_msg, HumanMessage(content=chunk.page_content)])
+                if "NO ENTITIES EXPLAINED" in reply.content:
+                    break
+                try:
+                    concepts.append(json.loads(reply.content))
+                    logger.debug("Chunk %d processed on attempt %d.", i, attempt + 1)
+                    break
+                except JSONDecodeError:
+                    logger.warning(
+                        "Chunk %d: invalid JSON on attempt %d, retrying.", i, attempt + 1
                     )
-                else:
-                    print(f"Successful formatting of chunk {i} after {j} iterations.")
+            else:
+                logger.error("Chunk %d: could not parse JSON after 10 attempts.", i)
 
-        concepts_unified = {"Entities": []}
-        for conc in concepts:
-            for el in conc["Entities"]:
-                concepts_unified["Entities"].append(el)
-
+        all_entities = [
+            entity
+            for concept in concepts
+            for entity in concept.get("Entities", [])
+        ]
         docs = [
             Document(
-                page_content=list(concept.keys())[0]
-                + ": "
-                + concept[str(list(concept.keys())[0])]
+                page_content=f"{list(e.keys())[0]}: {list(e.values())[0]}"
             )
-            for concept in concepts_unified["Entities"]
+            for e in all_entities
+            if e
         ]
         embeddings = OpenAIEmbeddings()
-
-        qdrant_named_entities = Qdrant.from_documents(
+        Qdrant.from_documents(
             docs,
             embeddings,
-            path=self.host_object.path,  # usually ner
+            path=self.host_object.path,
             collection_name=event.collection_name,
         )
-
-        print(
-            f"Agent {event.sender_id} has created the collection: {event.collection_name}."
+        logger.info(
+            "Agent %s created NER collection '%s'.",
+            event.sender_id,
+            event.collection_name,
         )
         self.host_object.send_event(
             VectorStoreCollectionCreated(
-            sender_id=self.host_object.id,
-            target_id=event.sender_id,
-            collection_name=event.collection_name,
-            has_been_created=True,
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                collection_name=event.collection_name,
+                has_been_created=True,
             )
         )
-        self.is_busy = False
+        self.host_object.is_busy = False
+
 
 class VectorStoreCollectionRetrieveQuery(AbstractEvent):
-    event_type = "agent_sends_query_to_retrieve_chunks"
-    description = "Event to signal the retrieval of chunks from a Qdrant collection based on a similarity query."
+    event_type: str = "agent_sends_query_to_retrieve_chunks"
+    description: str = "Retrieve chunks from a Qdrant collection by similarity."
     collection_name: str
     query: str
     num_chunks: int = 5
+    sender_id: str
 
 
 class VectorStoreCollectionSimilarChunks(AbstractEvent):
-    event_type = "vector_store_collection_similar_chunks"
-    description = "Provides a list of text chunks from a Qdrant collection that are similar to a given query."
+    event_type: str = "vector_store_collection_similar_chunks"
+    description: str = "Similar text chunks from a Qdrant collection."
     collection_name: str
     similar_chunks: List[str]
+    sender_id: str
+
 
 class RetrieveChunksBySimilarity(AbstractAction):
     trigger_event_class = VectorStoreCollectionRetrieveQuery
-    description = "Retrieves a list of text chunks from a Qdrant collection that are similar to a given query."
+    description = "Retrieve text chunks from a Qdrant collection similar to a query."
+
     def __init__(self, host_object: AbstractObject):
         super().__init__(host_object=host_object)
 
@@ -269,17 +237,40 @@ class RetrieveChunksBySimilarity(AbstractAction):
             embeddings=embeddings,
         )
         similar_chunks = [
-            el.page_content for el in qdrant.similarity_search(event.query, k=10)
+            el.page_content
+            for el in qdrant.similarity_search(event.query, k=event.num_chunks)
         ]
-
-        print(
-            f"Agent {event.sender_id} has retrieved: {event.num_chunks} chunks from {event.collection_name}."
+        logger.info(
+            "Agent %s retrieved %d chunks from '%s'.",
+            event.sender_id,
+            len(similar_chunks),
+            event.collection_name,
         )
         self.host_object.send_event(
             VectorStoreCollectionSimilarChunks(
-            sender_id=self.host_object.id,
-            target_id=event.sender_id,
-            collection_name=event.collection_name,
-            similar_chunks=similar_chunks,
+                sender_id=self.host_object.id,
+                target_id=event.sender_id,
+                collection_name=event.collection_name,
+                similar_chunks=similar_chunks,
             )
+        )
+
+
+class QdrantBucket(AbstractObject):
+    def __init__(self, id: str, path: str = "./vector_store.qdrant"):
+        self.path = path
+        self.is_busy = False
+        actions = [
+            GenerateTextChunkCollection(host_object=self),
+            GenerateNERCollection(host_object=self),
+            RetrieveChunksBySimilarity(host_object=self),
+        ]
+        super().__init__(
+            name="Qdrant Bucket",
+            description=(
+                "Manages interactions with the Qdrant vector store: generating text "
+                "chunk collections, NER collections, and similarity retrieval."
+            ),
+            id=id,
+            actions=actions,
         )

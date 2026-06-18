@@ -1,63 +1,57 @@
-from time import sleep
+import json
+import logging
 import threading
+import colorama
+
 import websocket
 
-from colorama import Fore
+logger = logging.getLogger(__name__)
+colorama.init()
 
 
-class SimulationSocketClient:
-    def __init__(self) -> None:
-        self.uri = "ws://127.0.0.1:7456/ws"
-        self.websocket = websocket.WebSocketApp(
-            self.uri,
+class TestClient:
+    def __init__(self, url: str = "ws://127.0.0.1:7456/ws"):
+        self.uri = url
+        self.ws = websocket.WebSocketApp(
+            self.url,
             on_open=self.on_open,
             on_message=self.on_message,
             on_error=self.on_error,
             on_close=self.on_close,
         )
-        print(f"Connected to world socket server {self.uri}")
 
     def on_open(self, ws):
-        print(f"World socket client opened connection to {self.uri}")
+        thread_name = threading.current_thread().name
+        logger.info("[%s] Connected to %s", thread_name, self.uri)
 
     def on_message(self, ws, message):
         thread_name = threading.current_thread().name
-        print(f"{Fore.GREEN}[{thread_name}] World socket client received: {message}")
+        logger.info("[%s] Received: %s", thread_name, message)
 
     def on_error(self, ws, error):
-        print(f"World socket client error: {error}")
+        logger.error("TestClient error: %s", error)
 
-    def on_close(self, ws):
-        print("World socket client closed connection")
+    def on_close(self, ws, close_status_code, close_msg):
+        logger.info("TestClient closed connection (code=%s)", close_status_code)
 
-    def send_messages_every_10secs(self):
+    def send_message(self, message: dict):
+        msg = json.dumps(message)
+        self.ws.send(msg)
         thread_name = threading.current_thread().name
-        while True:
-            sleep(10)
-            message = "Hello World!"
-            self.websocket.send(message)
-            print(f"{Fore.CYAN}[{thread_name}] World socket client sent: {message}")
+        logger.info("[%s] Sent: %s", thread_name, msg)
+
+    def run_forever(self):
+        self.ws.run_forever()
 
 
 def main():
-    world_socket_client = SimulationSocketClient()
-    world_socket_client_2 = SimulationSocketClient()
-    world_socket_client_3 = SimulationSocketClient()
-
-    threading.Thread(
-        target=world_socket_client.websocket.run_forever, name="Listener Test Thread"
-    ).start()
-    threading.Thread(
-        target=world_socket_client_2.websocket.run_forever,
-        name="Listener Test Thread 2",
-    ).start()
-    threading.Thread(
-        target=world_socket_client_3.websocket.run_forever,
-        name="Listener Test Thread 3",
-    ).start()
-    threading.Thread(
-        target=world_socket_client.send_messages_every_10secs, name="Sender Test Thread"
-    ).start()
+    client = TestClient()
+    thread = threading.Thread(
+        target=client.run_forever, name="TestClient Thread", daemon=True
+    )
+    thread.start()
+    thread.join()
 
 
-main()
+if __name__ == "__main__":
+    main()

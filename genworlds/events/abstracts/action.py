@@ -16,25 +16,13 @@ class AbstractAction(ABC, Generic[T]):
         self.host_object = host_object
 
     @property
-    def action_schema(self) -> Tuple(str):
-        """Returns the action schema as a string"""
+    def action_schema(self) -> Tuple[str, str]:
         return (
             f"{self.host_object.id}:{self.__class__.__name__}",
-            f"{self.description}|{self.trigger_event_class.__fields__['event_type'].default}|"
-            + json.dumps(self.trigger_event_class.schema()),
+            f"{self.description}|{self.trigger_event_class.model_fields['event_type'].default}|"
+            + json.dumps(self.trigger_event_class.model_json_schema()),
         )
-        # f"{type(self.host_object).__name__}|\n{self.host_object.description}|\n"
 
     @abstractmethod
     def __call__(self, event: T, *args: Any, **kwargs: Any) -> Any:
-        """
-        Execute the action, potentially generating one or more events.
-        Send the events with self.socket_handler.send_event(event).
-
-        :param event: The event that triggers the action.
-        :param args: Additional positional arguments.
-        :param kwargs: Additional keyword arguments.
-        :return: The result of the action execution. The type of the return value can be any type
-                 depending on the implementation.
-        """
         pass

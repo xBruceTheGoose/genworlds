@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import logging
 import threading
 from uuid import uuid4
 from typing import List
-import time
 
 from genworlds.objects.abstracts.object import AbstractObject
 from genworlds.agents.abstracts.agent import AbstractAgent
 from genworlds.worlds.abstracts.world import AbstractWorld
+
+logger = logging.getLogger(__name__)
 
 
 class Simulation:
@@ -16,63 +18,47 @@ class Simulation:
         name: str,
         description: str,
         world: AbstractWorld,
-        objects: List[tuple[AbstractObject, dict]],
-        agents: List[tuple[AbstractAgent, dict]],
+        objects: List[AbstractObject] = None,
+        agents: List[AbstractAgent] = None,
         stop_event: threading.Event = None,
     ):
         self.id = str(uuid4())
         self.name = name
         self.description = description
         self.world = world
-        self.objects = objects
-        self.agents = agents
         self.stop_event = stop_event
 
-    def add_agent(self, agent: AbstractAgent, **world_properties):
-        self.agents.append([agent, world_properties])
-        self.agents[-1][0].world_spawned_id = self.world.id
-        self.world.add_agent(self.agents[-1][0], **self.agents[-1][1])
-        self.agents[-1][0].launch()
+        # Add any agents/objects provided at construction time into the world
+        for obj in objects or []:
+            obj.host_world_id = world.id
+            if obj not in world.objects:
+                world.objects.append(obj)
 
-    def add_object(self, obj: AbstractObject, **world_properties):
-        self.objects.append([obj, world_properties])
-        self.objects[-1][0].world_spawned_id = self.world.id
-        self.world.add_object(self.objects[-1][0], **self.objects[-1][1])
-        self.objects[-1][0].launch_websocket_thread()
+        for agent in agents or []:
+            agent.host_world_id = world.id
+            if agent not in world.agents:
+                world.agents.append(agent)
 
-    # TODO: delete objects and agents
-    # TODO: update and restart objects and agents
+    def add_agent(self, agent: AbstractAgent):
+        self.world.add_agent(agent)
 
-    def launch(self):
-        # Register agents and objects with the world
-        for agent, world_properties in self.agents:
-            agent.world_spawned_id = self.world.id
-            self.world.register_agent(agent, **world_properties)
+    def add_object(self, obj: AbstractObject):
+        self.world.add_object(obj)
 
-        for obj, world_properties in self.objects:
-            obj.world_spawned_id = self.world.id
-            self.world.register_object(obj, **world_properties)
+    def launch(self, host: str = "127.0.0.1", port: int = 7456):
+        """
+        Launch the full simulation.  The world is responsible for starting the
+        WebSocket server and synchronising agent/object startup.
+        """
+        self.world.launch(host=host, port=port)
+        logger.info("Simulation '%s' (%s) running.", self.name, self.id)
 
-        # Launch the world
-        self.world.launch_websocket_thread()
-
-        time.sleep(1)
-
-        for agent, world_properties in self.agents:
-            time.sleep(0.1)
-            agent.launch()
-
-        for obj, world_properties in self.objects:
-            time.sleep(0.1)
-            obj.launch_websocket_thread()
-
-        # Make the application terminate gracefully
         while True:
-            # TODO: pass the stop event to the world and the objects and the agents
             if self.stop_event and self.stop_event.is_set():
+                logger.info("Stop event set — shutting down simulation.")
                 break
-
             try:
-                time.sleep(1)
+                threading.Event().wait(timeout=1.0)
             except KeyboardInterrupt:
+                logger.info("KeyboardInterrupt — shutting down simulation.")
                 break

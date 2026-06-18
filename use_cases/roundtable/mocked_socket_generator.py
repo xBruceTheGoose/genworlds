@@ -2,23 +2,19 @@ from collections import deque
 import fnmatch
 from importlib import import_module
 import json
+import logging
 from multiprocessing import Process
 import os
 import threading
 import time
-from genworlds.simulation.sockets.simulation_socket_client import SimulationSocketClient
+
+from genworlds.simulation.sockets.client import SimulationSocketClient
 from genworlds.simulation.sockets.server import start_thread
 
-from world_setup import (
-    launch_use_case,
-)  # Assuming that launch_use_case is defined in 'another_module.py'
+logger = logging.getLogger(__name__)
 
 
 def get_use_case_list():
-    """
-    Get the list of use cases by retrieving the names of folders in the 'use_cases' directory.
-    :return: JSONResponse with list of use case names
-    """
     path = "use_cases"
     use_cases = [
         dir_name
@@ -31,27 +27,25 @@ def get_use_case_list():
         try:
             file_names = os.listdir(os.path.join(path, use_case, "world_definitions"))
         except FileNotFoundError:
-            print(
-                f"No such directory: {os.path.join(path, use_case, 'world_definitions')}"
+            logger.warning(
+                "No such directory: %s",
+                os.path.join(path, use_case, "world_definitions"),
             )
             continue
 
         for file_name in file_names:
             if fnmatch.fnmatch(file_name, "*.yaml"):
                 world_definitions.append(
-                    {
-                        "use_case": use_case,
-                        "world_definition": file_name,
-                    }
+                    {"use_case": use_case, "world_definition": file_name}
                 )
 
     return world_definitions
 
 
 def write_dict_to_file(dict_obj, filepath):
-    with open(filepath, "w") as f:  # 'w' for write mode
-        f.write(json.dumps(dict_obj))  # convert dict to str using json.dumps
-        f.write("\n")  # add a newline at the end for readability
+    with open(filepath, "w") as f:
+        f.write(json.dumps(dict_obj))
+        f.write("\n")
 
 
 def start_server_and_simulation(use_case, world_definition, port):
@@ -61,10 +55,8 @@ def start_server_and_simulation(use_case, world_definition, port):
     module = import_module(module_name)
     launch_use_case = getattr(module, function_name)
 
-    # start the server
     start_thread(port=port)
 
-    # start the recorder
     file_path = os.path.join(
         "use_cases",
         use_case,
@@ -81,7 +73,6 @@ def start_server_and_simulation(use_case, world_definition, port):
     socket_recorder = SimulationSocketClient(
         process_event=process_event,
         url=websocket_url,
-        log_level="ERROR",
     )
 
     threading.Thread(
@@ -90,7 +81,6 @@ def start_server_and_simulation(use_case, world_definition, port):
         daemon=True,
     ).start()
 
-    # start the simulation
     launch_use_case(
         world_definition=world_definition,
         yaml_data_override={
@@ -105,28 +95,24 @@ def kill_process(p):
 
 
 def chunks(lst, n):
-    """Yield successive n-sized chunks from lst."""
     for i in range(0, len(lst), n):
         yield lst[i : i + n]
 
 
 if __name__ == "__main__":
     use_case_list = get_use_case_list()
-    print(use_case_list)
+    logger.info("Use cases: %s", use_case_list)
 
     port = 10000
-
     running_processes = []
-
     parallel_processes = 5
     minutes = 30
     runtime = minutes * 60
     stagger_time = 60
 
-    use_case_chunks = chunks(use_case_list, parallel_processes)
-    for use_case_list in use_case_chunks:
-        print(f"Processing {use_case_list}")
-        for use_case_dict in use_case_list:
+    for chunk in chunks(use_case_list, parallel_processes):
+        logger.info("Processing chunk: %s", chunk)
+        for use_case_dict in chunk:
             use_case = use_case_dict["use_case"]
             world_definition = use_case_dict["world_definition"]
 
@@ -144,16 +130,9 @@ if __name__ == "__main__":
             threading.Timer(runtime, kill_process, args=[p]).start()
 
             port += 1
-            # stagger the start of each process
             time.sleep(stagger_time)
 
         time.sleep(runtime + parallel_processes * stagger_time)
 
-    is_any_alive = True
-    while is_any_alive:
-        is_any_alive = False
-        for p in running_processes:
-            if p.is_alive():
-                is_any_alive = True
-                break
+    while any(p.is_alive() for p in running_processes):
         time.sleep(1)

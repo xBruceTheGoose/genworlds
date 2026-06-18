@@ -1,7 +1,11 @@
 import json
+import logging
 from datetime import datetime
+from typing import Tuple, Union
+
 from jsonschema import ValidationError, validate
-from genworlds.agents.memories.simulation_memory import OneLineEventSummarizer
+
+logger = logging.getLogger(__name__)
 
 
 def validate_action(
@@ -9,39 +13,39 @@ def validate_action(
     action_schema: str,
     pre_filled_event: dict,
     available_action_schemas: dict,
-):
-    one_line_summarizer = OneLineEventSummarizer()  # missing key
+) -> Union[Tuple[bool, dict], str]:
+    """
+    Validates a pre-filled event against its JSON schema.
+
+    Returns (is_my_action, trigger_event) on success, or an error string on failure.
+    """
     try:
-        class_name, event_type = action_schema.split(":")
+        class_name, event_type = action_schema.split(":", 1)
         trigger_event = {
             "event_type": event_type,
             "sender_id": agent_id,
             "created_at": datetime.now().isoformat(),
         }
         trigger_event.update(pre_filled_event)
-        summary = one_line_summarizer.summarize(json.dumps(trigger_event))
-        trigger_event["summary"] = summary
 
-        event_schema = available_action_schemas[class_name][event_type]
+        if action_schema not in available_action_schemas:
+            return (
+                f"Unknown action schema '{action_schema}'. "
+                "Please refer to the available action schemas."
+            )
 
+        raw_schema = available_action_schemas[action_schema]
+        event_schema = json.loads(raw_schema.split("|")[-1])
         validate(trigger_event, event_schema)
 
-        if class_name == "Self":
-            is_my_action = True
-        else:
-            is_my_action = False
+        is_my_action = class_name == agent_id
         return is_my_action, trigger_event
-    except IndexError as e:
+    except (ValueError, IndexError):
         return (
-            f"Unknown command '{action_schema}'. "
-            f"Please refer to the 'COMMANDS' list for available "
-            f"commands and only respond in the specified JSON format."
+            f"Malformed action schema '{action_schema}'. "
+            "Expected format: '<entity_id>:<ActionClass>'."
         )
     except ValidationError as e:
-        return (
-            f"Validation Error in args: {str(e)}, pre_filled_event: {pre_filled_event}"
-        )
+        return f"Validation Error in args: {e.message}, pre_filled_event: {pre_filled_event}"
     except Exception as e:
-        return (
-            f"Error: {str(e)}, {type(e).__name__}, pre_filled_event: {pre_filled_event}"
-        )
+        return f"Error: {e!s}, {type(e).__name__}, pre_filled_event: {pre_filled_event}"
