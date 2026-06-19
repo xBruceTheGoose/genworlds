@@ -2,7 +2,8 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from genworlds.simulation.sockets.server import WebSocketManager
+from genworlds.simulation.sockets.server import WebSocketManager, app
+from genworlds.simulation.metrics import SimulationMetrics
 
 
 class TestWebSocketManager:
@@ -48,3 +49,26 @@ class TestWebSocketManager:
         await self.manager.send_update("data")
         assert ws_bad not in self.manager.active_connections
         assert ws_good in self.manager.active_connections
+
+
+class TestHealthEndpoint:
+    @pytest.mark.asyncio
+    async def test_health_check(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "healthy"}
+
+
+class TestMetricsEndpoint:
+    @pytest.mark.asyncio
+    async def test_metrics_endpoint_returns_json(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/metrics")
+        assert response.status_code == 200
+        data = response.json()
+        assert "events" in data
+        assert "connections" in data
+        assert "performance" in data

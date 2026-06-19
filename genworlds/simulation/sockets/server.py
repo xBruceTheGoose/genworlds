@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import argparse
+import json
 import logging
 import sys
 import threading
+import time
 from contextlib import asynccontextmanager
 from typing import List
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
+
+from genworlds.simulation.metrics import get_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +33,7 @@ class WebSocketManager:
         await websocket.accept()
         async with self._get_lock():
             self.active_connections.append(websocket)
+        get_metrics().record_connection_opened()
 
     async def disconnect(self, websocket: WebSocket):
         async with self._get_lock():
@@ -35,23 +41,28 @@ class WebSocketManager:
                 self.active_connections.remove(websocket)
             except ValueError:
                 pass
+        get_metrics().record_connection_closed()
 
-    async def send_update(self, data: str):
+    async def send_update(self, data: str, event_type: str | None = None):
         async with self._get_lock():
             connections = list(self.active_connections)
 
         stale: List[WebSocket] = []
+        send_start = time.perf_counter()
         for connection in connections:
             try:
                 await connection.send_text(data)
             except RuntimeError as e:
                 if "websocket.close" in str(e) or "Unexpected ASGI" in str(e):
                     stale.append(connection)
+                    get_metrics().record_connection_error()
                 else:
                     logger.warning("WebSocket send error: %s", e)
+                    get_metrics().record_connection_error()
             except Exception as e:
                 logger.warning("WebSocket send error: %s", e)
                 stale.append(connection)
+                get_metrics().record_connection_error()
 
         if stale:
             async with self._get_lock():
@@ -74,6 +85,18 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
+@app.get("/metrics")
+async def get_metrics_endpoint():
+    """Return simulation metrics as JSON."""
+    return JSONResponse(content=get_metrics().get_summary())
+
+
+@app.get("/health")
+async def health_check():
+    """Simple health check endpoint."""
+    return {"status": "healthy"}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket_manager.connect(websocket)
@@ -81,7 +104,20 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             logger.debug("Received: %s", data)
-            await websocket_manager.send_update(data)
+            metrics = get_metrics()
+            try:
+                event = json.loads(data)
+                event_type = event.get("event_type", "unknown")
+                sender_id = event.get("sender_id", "unknown")
+                target_id = event.get("target_id")
+                metrics.record_event_received(event_type, sender_id, target_id)
+                send_start = time.perf_counter()
+                await websocket_manager.send_update(data, event_type)
+                latency_ms = (time.perf_counter() - send_start) * 1000
+                metrics.record_event_processed(event_type, latency_ms)
+            except json.JSONDecodeError:
+                metrics.record_event_received("invalid_json", "unknown")
+                await websocket_manager.send_update(data)
     except WebSocketDisconnect as e:
         logger.info("Client disconnected (code=%s)", e.code)
     except Exception as e:

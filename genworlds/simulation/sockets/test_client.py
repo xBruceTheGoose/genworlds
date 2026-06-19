@@ -11,7 +11,7 @@ colorama.init()
 
 class TestClient:
     def __init__(self, url: str = "ws://127.0.0.1:7456/ws"):
-        self.uri = url
+        self.url = url
         self.ws = websocket.WebSocketApp(
             self.url,
             on_open=self.on_open,
@@ -22,7 +22,7 @@ class TestClient:
 
     def on_open(self, ws):
         thread_name = threading.current_thread().name
-        logger.info("[%s] Connected to %s", thread_name, self.uri)
+        logger.info("[%s] Connected to %s", thread_name, self.url)
 
     def on_message(self, ws, message):
         thread_name = threading.current_thread().name
