@@ -72,3 +72,34 @@ class TestMetricsEndpoint:
         assert "events" in data
         assert "connections" in data
         assert "performance" in data
+
+    @pytest.mark.asyncio
+    async def test_prometheus_endpoint_returns_text(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/metrics/prometheus")
+        assert response.status_code == 200
+        text = response.text
+        assert "genworlds_uptime_seconds" in text
+        assert "genworlds_events_total" in text
+        assert "genworlds_connections_active" in text
+        assert "# TYPE" in text
+        assert "# HELP" in text
+
+    @pytest.mark.asyncio
+    async def test_metrics_reset_endpoint(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/metrics/reset")
+        assert response.status_code == 200
+        assert response.json()["status"] == "reset"
+
+    @pytest.mark.asyncio
+    async def test_connections_endpoint(self):
+        from fastapi.testclient import TestClient
+        client = TestClient(app)
+        response = client.get("/connections")
+        assert response.status_code == 200
+        data = response.json()
+        assert "active_count" in data
+        assert "client_ids" in data
